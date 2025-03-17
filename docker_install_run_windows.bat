@@ -85,6 +85,37 @@ echo RUN pip install --no-cache-dir -r requirements.txt
 echo CMD ["python", "forwarder.py"]
 ) > Dockerfile
 
+:: Create restart script
+set INSTALL_DIR=%USERPROFILE%\channel_forward_bot
+if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
+
+echo Creating auto-restart script...
+(
+echo @echo off
+echo echo Checking if channel_forward_bot container is running...
+echo docker ps -q -f name=channel_forward_bot ^> nul 2^>^&1
+echo if %%errorlevel%% neq 0 ^(
+echo     echo Container is not running. Attempting to restart...
+echo     docker start channel_forward_bot ^> nul 2^>^&1
+echo     if %%errorlevel%% neq 0 ^(
+echo         echo Container doesn't exist. Creating new container...
+echo         docker run -d --name channel_forward_bot --restart unless-stopped -v "%%USERPROFILE%%\channel_forward_bot_data:/app/data" channel_forward_bot
+echo     ^) else ^(
+echo         echo Container restarted successfully.
+echo     ^)
+echo ^) else ^(
+echo     echo Container is already running.
+echo ^)
+) > "%INSTALL_DIR%\restart_bot.bat"
+
+:: Create Task Scheduler command
+echo Creating scheduled task for auto-restart...
+(
+echo @echo off
+echo schtasks /create /tn "RestartChannelForwardBot" /tr "%INSTALL_DIR%\restart_bot.bat" /sc onstart /ru "%USERNAME%" /f
+echo schtasks /create /tn "RestartChannelForwardBotHourly" /tr "%INSTALL_DIR%\restart_bot.bat" /sc hourly /ru "%USERNAME%" /f
+) > "%INSTALL_DIR%\setup_scheduled_restart.bat"
+
 :: Build and run the Docker container
 echo Building Docker image...
 docker build -t channel_forward_bot .
@@ -103,7 +134,8 @@ echo 1. Run the bot (with latest code)
 echo 2. Update and run the bot
 echo 3. Stop the bot
 echo 4. View logs
-echo 5. Exit
+echo 5. Setup auto-restart (on system startup and hourly)
+echo 6. Exit
 echo.
 
 set /p choice=Enter your choice:
@@ -112,7 +144,7 @@ if "%choice%"=="1" (
     echo Starting the bot in Docker container...
     docker stop channel_forward_bot 2>nul
     docker rm channel_forward_bot 2>nul
-    docker run -d --name channel_forward_bot -v "%DATA_DIR%:/app/data" channel_forward_bot
+    docker run -d --name channel_forward_bot --restart unless-stopped -v "%DATA_DIR%:/app/data" channel_forward_bot
     echo Bot is running in background. Use option 4 to view logs.
     pause
     goto menu
@@ -134,7 +166,7 @@ if "%choice%"=="2" (
     docker build -t channel_forward_bot .
 
     echo Starting updated bot...
-    docker run -d --name channel_forward_bot -v "%DATA_DIR%:/app/data" channel_forward_bot
+    docker run -d --name channel_forward_bot --restart unless-stopped -v "%DATA_DIR%:/app/data" channel_forward_bot
     echo Bot updated and running in background. Use option 4 to view logs.
     pause
     goto menu
@@ -153,6 +185,13 @@ if "%choice%"=="4" (
     goto menu
 )
 if "%choice%"=="5" (
+    echo Setting up auto-restart for the bot...
+    call "%INSTALL_DIR%\setup_scheduled_restart.bat"
+    echo Auto-restart has been set up. The bot will restart on system startup and hourly.
+    pause
+    goto menu
+)
+if "%choice%"=="6" (
     echo Exiting...
     exit /b 0
 )

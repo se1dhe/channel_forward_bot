@@ -79,6 +79,50 @@ RUN pip install --no-cache-dir -r requirements.txt
 CMD ["python", "forwarder.py"]
 EOF
 
+# Create installation directory
+INSTALL_DIR="$HOME/channel_forward_bot"
+mkdir -p "$INSTALL_DIR"
+
+# Create restart script
+echo "Creating auto-restart script..."
+cat > "$INSTALL_DIR/restart_bot.sh" << 'EOF'
+#!/bin/bash
+
+echo "Checking if channel_forward_bot container is running..."
+if ! docker ps -q -f name=channel_forward_bot > /dev/null 2>&1; then
+    echo "Container is not running. Attempting to restart..."
+    if ! docker start channel_forward_bot > /dev/null 2>&1; then
+        echo "Container doesn't exist. Creating new container..."
+        docker run -d --name channel_forward_bot --restart unless-stopped -v "$HOME/channel_forward_bot_data:/app/data" channel_forward_bot
+    else
+        echo "Container restarted successfully."
+    fi
+else
+    echo "Container is already running."
+fi
+EOF
+
+# Make restart script executable
+chmod +x "$INSTALL_DIR/restart_bot.sh"
+
+# Create crontab setup script
+echo "Creating crontab setup script..."
+cat > "$INSTALL_DIR/setup_cron_restart.sh" << EOF
+#!/bin/bash
+
+# Remove any existing cron jobs for the bot
+crontab -l | grep -v "restart_bot.sh" | crontab -
+
+# Add new cron jobs for restart
+(crontab -l 2>/dev/null; echo "@reboot $INSTALL_DIR/restart_bot.sh > /dev/null 2>&1") | crontab -
+(crontab -l 2>/dev/null; echo "0 * * * * $INSTALL_DIR/restart_bot.sh > /dev/null 2>&1") | crontab -
+
+echo "Cron jobs set up. Bot will restart on system reboot and every hour."
+EOF
+
+# Make crontab setup script executable
+chmod +x "$INSTALL_DIR/setup_cron_restart.sh"
+
 # Build the Docker image
 echo "Building Docker image..."
 docker build -t channel_forward_bot .
@@ -97,7 +141,8 @@ while true; do
     echo "2. Update and run the bot"
     echo "3. Stop the bot"
     echo "4. View logs"
-    echo "5. Exit"
+    echo "5. Setup auto-restart (on system startup and hourly)"
+    echo "6. Exit"
     echo ""
 
     read -p "Enter your choice: " choice
@@ -107,7 +152,7 @@ while true; do
             echo "Starting the bot in Docker container..."
             docker stop channel_forward_bot 2>/dev/null
             docker rm channel_forward_bot 2>/dev/null
-            docker run -d --name channel_forward_bot -v "$DATA_DIR:/app/data" channel_forward_bot
+            docker run -d --name channel_forward_bot --restart unless-stopped -v "$DATA_DIR:/app/data" channel_forward_bot
             echo "Bot is running in background. Use option 4 to view logs."
             read -p "Press Enter to continue..."
             ;;
@@ -128,7 +173,7 @@ while true; do
             docker build -t channel_forward_bot .
 
             echo "Starting updated bot..."
-            docker run -d --name channel_forward_bot -v "$DATA_DIR:/app/data" channel_forward_bot
+            docker run -d --name channel_forward_bot --restart unless-stopped -v "$DATA_DIR:/app/data" channel_forward_bot
             echo "Bot updated and running in background. Use option 4 to view logs."
             read -p "Press Enter to continue..."
             ;;
@@ -144,6 +189,11 @@ while true; do
             docker logs -f channel_forward_bot
             ;;
         5)
+            echo "Setting up auto-restart for the bot..."
+            "$INSTALL_DIR/setup_cron_restart.sh"
+            read -p "Press Enter to continue..."
+            ;;
+        6)
             echo "Exiting..."
             exit 0
             ;;
