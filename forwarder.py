@@ -21,7 +21,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_filename),
+        logging.FileHandler(log_filename, encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
@@ -32,7 +32,7 @@ logger = logging.getLogger('telegram_forwarder')
 logger.info("Reading configuration file")
 config = configparser.ConfigParser()
 try:
-    config.read('config.ini')
+    config.read('config.ini', encoding='utf-8')  # Явно указываем кодировку UTF-8
     logger.info("Configuration file successfully read")
 except Exception as e:
     logger.error(f"Error reading configuration file: {e}")
@@ -60,6 +60,18 @@ except Exception as e:
     logger.error(f"Error getting source settings: {e}")
     sys.exit(1)
 
+# Filter settings
+try:
+    stop_words = [word.strip() for word in config['Filters']['stop_words'].split(',')]
+    skip_messages_with_links = config['Filters'].getboolean('skip_messages_with_links')
+    logger.info(f"Filter settings received. Stop words: {stop_words}")
+    logger.info(f"Skip messages with links: {skip_messages_with_links}")
+except Exception as e:
+    logger.error(f"Error getting filter settings: {e}")
+    stop_words = []
+    skip_messages_with_links = False
+    logger.info("Using default filter settings")
+
 # Client initialization
 logger.info("Initializing Telegram client")
 client = TelegramClient('forwarder_session', api_id, api_hash)
@@ -67,7 +79,42 @@ client = TelegramClient('forwarder_session', api_id, api_hash)
 # Statistics counters
 message_counter = 0
 error_counter = 0
+skipped_counter = 0
 start_time = time.time()
+
+
+async def check_for_links(message):
+    """Check if message contains links"""
+    if not message.text:
+        return False
+
+    # Check for link entities
+    if message.entities:
+        for entity in message.entities:
+            if isinstance(entity, (MessageEntityUrl, MessageEntityTextUrl)):
+                return True
+
+    # Pattern for URLs
+    url_pattern = re.compile(r'https?://\S+|www\.\S+')
+    if url_pattern.search(message.text):
+        return True
+
+    return False
+
+
+async def check_for_stop_words(message):
+    """Check if message contains stop words"""
+    if not message.text or not stop_words:
+        return False
+
+    message_text = message.text.lower()
+    for word in stop_words:
+        word_lower = word.lower()
+        if word_lower in message_text:
+            logger.info(f"Found stop word: {word}")
+            return True
+
+    return False
 
 
 async def remove_links(message):
@@ -140,6 +187,7 @@ async def remove_links(message):
 
     return message, link_count
 
+
 # Add random delay for more natural behavior
 async def random_delay():
     base_delay = random.uniform(min_delay, max_delay)
@@ -148,15 +196,31 @@ async def random_delay():
     logger.info(f"Added random delay: {delay:.2f} seconds")
     await asyncio.sleep(delay)
 
+
 # Handler for new messages in source channel
 @client.on(events.NewMessage(chats=source_channels))
 async def forward_handler(event):
-    global message_counter, error_counter
+    global message_counter, error_counter, skipped_counter
 
     try:
         source_channel_id = event.chat_id
         message_id = event.message.id
         logger.info(f"Received new message from channel {source_channel_id}, message ID: {message_id}")
+
+        # Check for stop words
+        has_stop_words = await check_for_stop_words(event.message)
+        if has_stop_words:
+            logger.info(f"Message contains stop words. Skipping.")
+            skipped_counter += 1
+            return
+
+        # Check for links if we need to skip messages with links
+        if skip_messages_with_links:
+            has_links = await check_for_links(event.message)
+            if has_links:
+                logger.info(f"Message contains links. Skipping.")
+                skipped_counter += 1
+                return
 
         # Add random delay before forwarding
         await random_delay()
@@ -197,26 +261,31 @@ async def forward_handler(event):
         uptime = time.time() - start_time
 
         logger.info(f"Message successfully forwarded to channel {target_channel_id} in {send_time:.2f} seconds")
-        logger.info(f"Statistics: processed {message_counter} messages, {error_counter} errors, uptime: {uptime/60:.2f} minutes")
+        logger.info(
+            f"Statistics: processed {message_counter} messages, {error_counter} errors, skipped {skipped_counter} messages, uptime: {uptime / 60:.2f} minutes")
 
     except Exception as e:
         error_counter += 1
         logger.error(f"Error forwarding message: {e}", exc_info=True)
+
 
 # Function to output statistics every hour
 async def print_stats():
     while True:
         await asyncio.sleep(3600)  # Every hour
         uptime = time.time() - start_time
-        success_rate = (message_counter / (message_counter + error_counter)) * 100 if (message_counter + error_counter) > 0 else 0
+        success_rate = (message_counter / (message_counter + error_counter)) * 100 if (
+                                                                                                  message_counter + error_counter) > 0 else 0
 
         logger.info("=" * 50)
         logger.info("STATISTICS")
-        logger.info(f"Uptime: {uptime/3600:.2f} hours")
+        logger.info(f"Uptime: {uptime / 3600:.2f} hours")
         logger.info(f"Processed messages: {message_counter}")
+        logger.info(f"Skipped messages: {skipped_counter}")
         logger.info(f"Errors: {error_counter}")
         logger.info(f"Success rate: {success_rate:.2f}%")
         logger.info("=" * 50)
+
 
 # Bot startup
 async def main():
@@ -225,6 +294,8 @@ async def main():
     logger.info(f"Date and time of startup: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"Monitored channels: {source_channels}")
     logger.info(f"Target channel: {target_channel_id}")
+    logger.info(f"Stop words: {stop_words}")
+    logger.info(f"Skip messages with links: {skip_messages_with_links}")
     logger.info("=" * 50)
 
     try:
@@ -241,6 +312,7 @@ async def main():
         logger.critical(f"Critical error: {e}", exc_info=True)
     finally:
         logger.info("Bot shutdown")
+
 
 # Launch main function
 if __name__ == "__main__":
