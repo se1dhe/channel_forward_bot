@@ -104,13 +104,12 @@ async def check_for_links(message):
 
 async def check_for_stop_words(message):
     """Check if message contains stop words"""
-    if not message.text or not stop_words:
+    if not message.text or not stop_words or (len(stop_words) == 1 and stop_words[0] == ''):
         return False
 
     message_text = message.text.lower()
     for word in stop_words:
-        word_lower = word.lower()
-        if word_lower in message_text:
+        if word and word.lower() in message_text:
             logger.info(f"Found stop word: {word}")
             return True
 
